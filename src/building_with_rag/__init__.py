@@ -1,1 +1,1 @@
-"""Building with RAG capstone seed."""
+"""Building Intelligence with RAG — capstone RAG API."""
