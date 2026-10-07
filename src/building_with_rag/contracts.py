@@ -1,14 +1,36 @@
 """Shared API contracts. Later stories extend additively; never rename or add provider variants."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from building_with_rag.ingestion.mongodb_schema import (
+    validate_access_level,
+    validate_act,
+    validate_status,
+)
 from building_with_rag.registry import Pattern
 
 
 class SemanticFilters(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     act: list[str] = Field(default_factory=list)
     status: list[str] = Field(default_factory=list)
     access_level: list[str] = Field(default_factory=list)
+
+    @field_validator("act")
+    @classmethod
+    def _check_act(cls, values: list[str]) -> list[str]:
+        return [validate_act(v) for v in values]
+
+    @field_validator("status")
+    @classmethod
+    def _check_status(cls, values: list[str]) -> list[str]:
+        return [validate_status(v) for v in values]
+
+    @field_validator("access_level")
+    @classmethod
+    def _check_access_level(cls, values: list[str]) -> list[str]:
+        return [validate_access_level(v) for v in values]
 
 
 class QueryRequest(BaseModel):
@@ -21,6 +43,14 @@ class QueryRequest(BaseModel):
     required_acts: list[str] | None = None
     chapter: str | None = None
 
+    @field_validator("question")
+    @classmethod
+    def _strip_question(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("question must not be empty or whitespace-only")
+        return value
+
 
 class RetrievedChunk(BaseModel):
     chunk_id: str
@@ -29,7 +59,16 @@ class RetrievedChunk(BaseModel):
     text: str
     heading: str
     score: float
-    # Available source fields are attached by later stories; origin is always preserved.
+    # Optional source details; missing values stay None, never guessed.
+    chunk_index: int | None = None
+    act_label: str | None = None
+    status: str | None = None
+    chapter: str | None = None
+    chapter_title: str | None = None
+    section_number: int | str | None = None
+    source_pdf: str | None = None
+    source_sha256: str | None = None
+    needs_review: bool | None = None
 
 
 class GenerationResult(BaseModel):

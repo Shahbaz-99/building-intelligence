@@ -42,7 +42,7 @@ One shared registry (single source of truth) holds only:
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
 
-All modes return honest `not_implemented` placeholder results until their own stories add behavior.
+`semantic` is real on `POST /v1/query` (Story 2.3); chat for `rag-semantic` and every other mode still return honest `not_implemented` placeholders until their own stories add behavior.
 
 ## API contracts
 
@@ -73,11 +73,29 @@ A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text
 ### Endpoints
 
 - `GET /healthz` — safe, no credentials required.
-- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult` placeholder per mode via one shared `run_pattern` path.
+- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`; `semantic` goes to `retrieval/semantic.py`, other modes return the `run_pattern` placeholder.
 - `GET /v1/models` — lists the six `rag-<pattern>` model IDs.
 - `POST /v1/chat/completions` — OpenAI-compatible, text-only `ChatCompletionRequest`: `model`, `messages` with `system`/`developer`/`user`/`assistant` roles, `stream`, `n`, and optional strict `rag_options` (`pattern`, list filters, `limit`, `required_acts`, `chapter`).
 
 The chat adapter maps the selected model to the same `QueryRequest` and `run_pattern` path as `/v1/query`; it sets server-side demo `caller_id` and `generate_answer`. Supports normal OpenAI Chat Completions JSON responses and role/content/stop frames, plus the OpenAI-style error envelope before streaming begins. No duplicated implementations, no custom SSE events that Open WebUI cannot render.
+
+## Semantic retrieval (Story 2.3)
+
+Flow: validate -> scope filters -> embed query -> `$vectorSearch` -> resolve chunk/section -> `QueryResult`.
+
+- Validate: `question` trimmed, non-empty; `SemanticFilters` forbids unknown fields and only accepts known `act`/`status`/`access_level` strings; `caller_id` must be omitted or equal `WEBUI_DEMO_CALLER_ID`; `required_acts` and `chapter` rejected (HTTP 422).
+- Scope: server fixes `access_level=["public"]`; caller `act`/`status` lists only narrow (`$in` inside the `$vectorSearch` `filter`).
+- Embed: raw question, `voyage-3.5`, `input_type="query"`, must return 1,024 dims. `numCandidates = min(200, max(limit, 50))`.
+- Resolve: hit `chunk_id` -> `chunks` (text) + `sections` (heading, chapter, source). Score order kept; chunks not de-duplicated; unresolved hits omitted and counted in `trace.unresolved_hits`.
+- Outcomes: `ok` (passages); `no_results` (HTTP 200, filters match nothing); 503 `retrieval_not_ready` (missing credentials, index not queryable, empty/mismatched embeddings); 502 `retrieval_upstream_error` (Voyage/MongoDB error). No score cutoff; scores rank similarity only.
+- `generate_answer` is accepted, nothing generated (`trace.ignored`).
+- Added optional `RetrievedChunk` fields: `chunk_index`, `act_label`, `status`, `chapter`, `chapter_title`, `section_number`, `source_pdf`, `source_sha256`, `needs_review`.
+
+Diagnostic (text truncated):
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "limit": 3}'   | jq '{status, trace, results: [.results[] | {chunk_id, section_id, act, heading, score, text: .text[:80]}]}'
+```
 
 ## Open WebUI (trainer-supplied, separate client)
 
