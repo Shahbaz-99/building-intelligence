@@ -1,5 +1,7 @@
 """Shared API contracts. Later stories extend additively; never rename or add provider variants."""
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from building_with_rag.ingestion.mongodb_schema import (
@@ -71,9 +73,33 @@ class RetrievedChunk(BaseModel):
     needs_review: bool | None = None
 
 
+class GenerationClaim(BaseModel):
+    text: str
+    evidence_labels: list[str] = Field(default_factory=list)
+
+
+class GenerationCitation(BaseModel):
+    label: str
+    chunk_id: str
+    section_id: str
+    act: str
+    heading: str = ""
+    chapter: str | None = None
+    section_number: int | str | None = None
+    source_pdf: str | None = None
+
+
 class GenerationResult(BaseModel):
     text: str = ""
     model: str | None = None
+    # Story 3.1 additive fields.
+    outcome: Literal["answered", "insufficient_evidence", "unavailable", "malformed"] | None = None
+    claims: list[GenerationClaim] = Field(default_factory=list)
+    citations: list[GenerationCitation] = Field(default_factory=list)
+    supporting_passages: list[RetrievedChunk] = Field(default_factory=list)
+    provider: str | None = None
+    trace: dict = Field(default_factory=dict)
+    context_outcome: Literal["assembled", "empty"] | None = None
 
 
 class QueryResult(BaseModel):

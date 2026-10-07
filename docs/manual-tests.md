@@ -153,3 +153,43 @@ uv run python scripts/extract_sections.py
 ```
 
 Expected: prints "BNS corpus up to date — skipping" and "IPC corpus up to date — skipping". No records appended or overwritten.
+## Story 3.1 — Grounded Answer Generation
+
+What it adds: `generate_answer: true` on a semantic `/v1/query` returns a grounded `generation` (`answered`, `insufficient_evidence`, `unavailable`, or `malformed`) with resolved citations.
+
+Prerequisite: start the API as in Story 1.1; `.env` needs `GENERATION_API_BASE_URL` and `GENERATION_API_KEY` (never print them).
+
+### Answerable question
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question": "What is the punishment for theft under the BNS?", "pattern": "semantic", "limit": 5, "generate_answer": true}' \
+  | jq '{status, g: (.generation | {outcome, model, provider, context_outcome, text: (.text[:300]), claims: [.claims[] | {t: .text[:80], e: .evidence_labels}], citations: [.citations[] | {label, chunk_id, section_id, act, heading}], trace}), ctx: [.results[] | {chunk_id, section_id, act, score}]}'
+```
+
+Expected: `status` `ok`, `generation.outcome` `answered`, non-empty `text`, claims with labels, `citations` whose `chunk_id` appear in `ctx`.
+
+### Unsupported question (edge case)
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question": "What is the GST rate on restaurant services?", "pattern": "semantic", "limit": 5, "generate_answer": true}' \
+  | jq '{status, g: (.generation | {outcome, text, claims, citations}), n: (.results | length)}'
+```
+
+Expected: `outcome` `insufficient_evidence`, empty `text`, no claims or citations, `n` > 0.
+
+### Unavailable generation (failure)
+
+Set `GENERATION_API_KEY=` (empty) in `.env`, restart the API, rerun the first command.
+
+Expected: HTTP 200, `generation.outcome` `unavailable`, empty `text`, `results` still present.
+
+### Without generate_answer
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question": "What is theft?", "pattern": "semantic", "limit": 3}' | jq '{status, generation}'
+```
+
+Expected: `status` `ok`, `generation` null.

@@ -88,7 +88,7 @@ Flow: validate -> scope filters -> embed query -> `$vectorSearch` -> resolve chu
 - Embed: raw question, `voyage-3.5`, `input_type="query"`, must return 1,024 dims. `numCandidates = min(200, max(limit, 50))`.
 - Resolve: hit `chunk_id` -> `chunks` (text) + `sections` (heading, chapter, source). Score order kept; chunks not de-duplicated; unresolved hits omitted and counted in `trace.unresolved_hits`.
 - Outcomes: `ok` (passages); `no_results` (HTTP 200, filters match nothing); 503 `retrieval_not_ready` (missing credentials, index not queryable, empty/mismatched embeddings); 502 `retrieval_upstream_error` (Voyage/MongoDB error). No score cutoff; scores rank similarity only.
-- `generate_answer` is accepted, nothing generated (`trace.ignored`).
+- `generate_answer: true` on `/v1/query` triggers grounded generation (see Story 3.1 below).
 - Added optional `RetrievedChunk` fields: `chunk_index`, `act_label`, `status`, `chapter`, `chapter_title`, `section_number`, `source_pdf`, `source_sha256`, `needs_review`.
 
 Diagnostic (text truncated):
@@ -96,6 +96,16 @@ Diagnostic (text truncated):
 ```bash
 curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "limit": 3}'   | jq '{status, trace, results: [.results[] | {chunk_id, section_id, act, heading, score, text: .text[:80]}]}'
 ```
+
+## Context and answer boundaries (Story 3.1)
+
+Flow: semantic result -> bounded labelled context (`generation/context.py`: max 5 passages, 12,000 chars, labels `E1..`, no mid-text cuts) -> one `POST {GENERATION_API_BASE_URL}/chat/completions` (`generation/answer.py`, httpx, 30 s, no retries) -> strict JSON parse -> citations resolved from supplied context only.
+
+- Outcomes (`GenerationResult.outcome`): `answered` (text, claims, citations, supporting passages), `insufficient_evidence` (also when no passages; no model call), `unavailable` (missing settings, timeout, connection error, non-2xx), `malformed` (non-JSON, no `choices`, unknown label, rule violation; no repair or retry). Non-answered outcomes carry empty text, claims, citations.
+- HTTP 200 for unavailable/malformed; retrieval `results` and `status` are unchanged. No URL or key in messages or trace.
+- Added optional `GenerationResult` fields: `outcome`, `claims`, `citations`, `supporting_passages`, `provider`, `trace`, `context_outcome`.
+- Evidence is untrusted source text, never instructions. No claims of current legal applicability beyond the supplied BNS/IPC documents.
+- Chat (`/v1/chat/completions`) keeps its placeholder; chat answers and streaming are Story 3.2.
 
 ## Open WebUI (trainer-supplied, separate client)
 
