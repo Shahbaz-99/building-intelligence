@@ -6,9 +6,12 @@ from building_with_rag.contracts import GenerationResult, QueryRequest, QueryRes
 from building_with_rag.generation.answer import stream_answer
 from building_with_rag.registry import Pattern, run_pattern
 from building_with_rag.retrieval.hybrid import run_hybrid
+from building_with_rag.retrieval.rerank import run_hybrid_reranked
 from building_with_rag.retrieval.semantic import run_semantic
 
-REAL_PATTERNS = frozenset({Pattern.SEMANTIC.value, Pattern.HYBRID.value})
+REAL_PATTERNS = frozenset(
+    {Pattern.SEMANTIC.value, Pattern.HYBRID.value, Pattern.HYBRID_RERANKED.value}
+)
 UNAVAILABLE_AFTER_TEXT = "\n\nAnswer generation unavailable — the text above is an unchecked draft."
 UNAVAILABLE_NO_TEXT = "Answer generation unavailable."
 
@@ -18,6 +21,8 @@ def retrieve(request: QueryRequest) -> QueryResult:
         return QueryResult(**run_semantic(request))
     if request.pattern is Pattern.HYBRID:
         return run_hybrid(request)
+    if request.pattern is Pattern.HYBRID_RERANKED:
+        return run_hybrid_reranked(request)
     return QueryResult(**run_pattern(request.pattern, request.question, request.caller_id))
 
 

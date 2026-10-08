@@ -42,7 +42,7 @@ One shared registry (single source of truth) holds only:
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
 
-`semantic` (Story 2.3) and `hybrid` (Story 4.1) are real on `POST /v1/query`; chat for `rag-semantic` and `rag-hybrid` runs the same path with streamed answers (Story 3.2); every other mode still returns an honest `not_implemented` placeholder until its own story adds behavior.
+`semantic` (Story 2.3), `hybrid` (Story 4.1) and `hybrid-reranked` (Story 4.2) are real on `POST /v1/query`; chat for their `rag-*` models runs the same path with streamed answers (Story 3.2); every other mode still returns an honest `not_implemented` placeholder until its own story adds behavior.
 
 ## API contracts
 
@@ -68,12 +68,12 @@ The classroom seed may resolve only its fixed local demo caller, but keeps `call
 
 ### `RetrievedChunk`
 
-A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text`, `heading`, `score`, and available source fields. Hybrid adds optional `semantic_score/rank`, `keyword_score/rank`, `fused_score/rank` (all `None` in semantic mode).
+A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text`, `heading`, `score`, and available source fields. Hybrid adds optional `semantic_score/rank`, `keyword_score/rank`, `fused_score/rank` (all `None` in semantic mode). Re-ranking adds optional `rerank_score`, `rerank_rank`, `omitted_reason`; `QueryResult.omitted_candidates` now holds re-rank cuts.
 
 ### Endpoints
 
 - `GET /healthz` — safe, no credentials required.
-- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`; `semantic` goes to `retrieval/semantic.py`, `hybrid` to `retrieval/hybrid.py`, other modes return the `run_pattern` placeholder.
+- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`; `semantic` goes to `retrieval/semantic.py`, `hybrid` to `retrieval/hybrid.py`, `hybrid-reranked` to `retrieval/rerank.py`, other modes return the `run_pattern` placeholder.
 - `GET /v1/models` — lists the six `rag-<pattern>` model IDs.
 - `POST /v1/chat/completions` — OpenAI-compatible, text-only `ChatCompletionRequest`: `model`, `messages` with `system`/`developer`/`user`/`assistant` roles, `stream`, `n`, and optional strict `rag_options` (`pattern`, list filters, `limit`, `required_acts`, `chapter`).
 
@@ -99,7 +99,7 @@ curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d 
 
 ## Context and answer boundaries (Story 3.1)
 
-Flow: semantic or hybrid result -> bounded labelled context (`generation/context.py`: max 5 passages, 12,000 chars, labels `E1..`, no mid-text cuts) -> one `POST {GENERATION_API_BASE_URL}/chat/completions` (`generation/answer.py`, httpx, 30 s, no retries) -> strict JSON parse -> citations resolved from supplied context only.
+Flow: result from any real mode (semantic, hybrid, hybrid-reranked) -> bounded labelled context (`generation/context.py`: max 5 passages, 12,000 chars, labels `E1..`, no mid-text cuts) -> one `POST {GENERATION_API_BASE_URL}/chat/completions` (`generation/answer.py`, httpx, 30 s, no retries) -> strict JSON parse -> citations resolved from supplied context only.
 
 - Outcomes (`GenerationResult.outcome`): `answered` (text, claims, citations, supporting passages), `insufficient_evidence` (also when no passages; no model call), `unavailable` (missing settings, timeout, connection error, non-2xx), `malformed` (non-JSON, no `choices`, unknown label, rule violation; no repair or retry). Non-answered outcomes carry empty text, claims, citations.
 - HTTP 200 for unavailable/malformed; retrieval `results` and `status` are unchanged. No URL or key in messages or trace.
@@ -170,3 +170,16 @@ Each record has 14 fields: `section_id`, `act`, `act_label`, `status`, `chapter`
 - Limitation: rank-only fusion ignores score magnitude; `text` matches any query term (OR), so long questions pull in common words; section numbers match only inside chunk `text`; no stemming/synonyms beyond the standard analyzer.
 - Diagnostic: `curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"<q>","pattern":"hybrid","limit":5}'`; read `trace.contribution` and per-result `semantic_rank`/`keyword_rank`/`fused_rank` (truncate `text`).
 - Limitations update: Atlas required; no `$text`. The Atlas Search index `chunk_text_index` on `chunks` replaces "no keyword/hybrid index fields".
+
+## Re-ranking (Story 4.2)
+
+- Settings (defaults): `RERANK_API_KEY` (empty; required), `RERANK_API_BASE_URL` (`https://api.voyageai.com/v1`), `RERANK_MODEL_NAME` (`rerank-2.5`), `RERANK_REQUEST_TIMEOUT_SECONDS` (30), `RERANK_CANDIDATE_LIMIT` (20), `RERANK_SEND_LIMIT` (10), `RERANK_RETURN_LIMIT` (5). Valid when `1 <= RETURN <= SEND <= CANDIDATE <= 20` and timeout >= 1; else 503 `retrieval_not_ready` naming the setting. Checked before any Voyage/MongoDB call.
+- Request: one `POST {base}/rerank` (httpx, Bearer key, `{model, query, documents}`, no `top_k`, no retries). Document = `"{heading}
+{chunk text}"`.
+- Reply validation: `data` non-empty list; `index` int, in sent range, unique; `relevance_score` finite number; all sent candidates scored. Else 502 `retrieval_upstream_error`. No score is invented.
+- Selection (`rerank.select`): candidates = top `RERANK_CANDIDATE_LIMIT` hybrid results; first `RERANK_SEND_LIMIT` sent, rest `omitted_reason: "not_sent_to_reranker"`; sent ordered by `relevance_score` desc (ties `fused_rank`), `rerank_rank` 1-based; final = first `min(limit, RERANK_RETURN_LIMIT)`, rest `"below_return_limit"` (scores kept).
+- Result: `results` ordered by `rerank_rank`, `score == rerank_score`, hybrid fields kept as "before"; `omitted_candidates` in `fused_rank` order. Hybrid `no_results` -> `no_results`, no provider call.
+- Trace: `mode`, `query`, `filters`, `caller_id`, `result_count`, `hybrid` (embedding, semantic, keyword, fusion, contribution, unresolved_hits), `rerank` (model, limits, counts, `latency_ms`, `usage_tokens`).
+- Outcomes: `ok`, `no_results`, 503 (config), 502 (provider). No fallback to hybrid.
+- Limitations: candidates beyond the top `RERANK_CANDIDATE_LIMIT` are never seen; each passage is scored independently against the question; scores are model-specific, uncalibrated, not comparable with fused scores or across questions; no score cutoff; one extra provider call per request (latency, cost, rate limits); no retry, no fallback; answer context cap (5 passages / 12,000 chars) still applies.
+- Diagnostic: `curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"<q>","pattern":"hybrid-reranked","limit":5}'`; read `trace.rerank`, then `results` and `omitted_candidates` (`fused_rank`, `rerank_rank`, `omitted_reason`), truncating `text`.

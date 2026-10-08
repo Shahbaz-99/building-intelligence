@@ -111,7 +111,7 @@ def effective_filters(request: QueryRequest) -> dict[str, list[str]]:
 
 
 def check_scope(request: QueryRequest) -> None:
-    """Reject scope semantic/hybrid mode cannot honour (HTTP 422)."""
+    """Reject scope the selected mode cannot honour (HTTP 422)."""
     problems = []
     if request.caller_id is not None and request.caller_id != get_settings().webui_demo_caller_id:
         problems.append("caller_id does not match the effective caller")

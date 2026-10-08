@@ -50,7 +50,7 @@ curl -s http://127.0.0.1:8000/v1/query \
   -d '{"question": "What is theft?", "pattern": "hybrid-reranked"}'
 ```
 
-Expected: `"status":"not_implemented"`, message references `hybrid-reranked`.
+Expected (needs `.env` incl. `RERANK_API_KEY`): `"status":"ok"`, `results` ordered by `rerank_rank` with `score == rerank_score`, cut candidates in `omitted_candidates` with `omitted_reason`. Empty `RERANK_API_KEY`: HTTP 503 `retrieval_not_ready`.
 
 ### Query — structured
 
@@ -97,7 +97,7 @@ Expected: 422 validation error (question below min_length 1).
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid-reranked", "messages": [{"role": "user", "content": "What is theft?"}]}'
+  -d '{"model": "rag-structured", "messages": [{"role": "user", "content": "What is theft?"}]}'
 ```
 
 Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contains `not implemented yet`.
@@ -107,7 +107,7 @@ Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contai
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid-reranked", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
+  -d '{"model": "rag-structured", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
 ```
 
 Expected: SSE `data:` frames with `delta` role then content, ending with `data: [DONE]`.
@@ -231,4 +231,13 @@ curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d 
 curl -sN http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json"   -d '{"model":"rag-hybrid","stream":true,"messages":[{"role":"user","content":"criminal breach of trust"}]}' | head -c 1500
 ```
 
-Expected: `status` `ok`, results in non-increasing `score`, each with a `semantic_rank` or `keyword_rank`; chat shows DRAFT, confidence, Sources. `hybrid-reranked`, `structured`, `decomposition`, `hyde` still `not_implemented`.
+Expected: `status` `ok`, results in non-increasing `score`, each with a `semantic_rank` or `keyword_rank`; chat shows DRAFT, confidence, Sources. `structured`, `decomposition`, `hyde` still `not_implemented`.
+
+## Story 4.2 — Hybrid re-ranking
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question":"What is the difference between culpable homicide and murder?","pattern":"hybrid-reranked","limit":5}'   | jq '{status, t: .trace.rerank, r: [(.results[]|.+{kept:true}), (.omitted_candidates[]|.+{kept:false})] | map({section_id, kept, fr: .fused_rank, rr: .rerank_rank, rs: .rerank_score, why: .omitted_reason, text: .text[:50]}) | sort_by(.fr)}'
+curl -sN http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json"   -d '{"model":"rag-hybrid-reranked","stream":true,"messages":[{"role":"user","content":"What is theft?"}]}' | head -c 1500
+```
+
+Expected: `status` `ok`; results + omitted = `trace.rerank.candidates`; chat shows DRAFT, confidence, Sources. Empty `RERANK_API_KEY` (restart API): 503 `retrieval_not_ready`, `hybrid` still `ok`.

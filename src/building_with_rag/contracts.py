@@ -78,6 +78,10 @@ class RetrievedChunk(BaseModel):
     keyword_rank: int | None = None
     fused_score: float | None = None
     fused_rank: int | None = None
+    # Story 4.2 re-ranking evidence; omitted_reason is set only on omitted candidates.
+    rerank_score: float | None = None
+    rerank_rank: int | None = None
+    omitted_reason: str | None = None
 
 
 class GenerationClaim(BaseModel):
