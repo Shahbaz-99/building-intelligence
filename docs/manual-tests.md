@@ -40,7 +40,7 @@ curl -s http://127.0.0.1:8000/v1/query \
   -d '{"question": "What is theft?", "pattern": "hybrid"}'
 ```
 
-Expected: `"status":"not_implemented"`, message references `hybrid`.
+Expected (needs `.env` and `chunk_text_index`): `"status":"ok"`, `trace.contribution`, per-result `semantic_rank`/`keyword_rank`/`fused_rank`, `score == fused_score`. Index missing: HTTP 503 `retrieval_not_ready`.
 
 ### Query — hybrid-reranked
 
@@ -97,7 +97,7 @@ Expected: 422 validation error (question below min_length 1).
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid", "messages": [{"role": "user", "content": "What is theft?"}]}'
+  -d '{"model": "rag-hybrid-reranked", "messages": [{"role": "user", "content": "What is theft?"}]}'
 ```
 
 Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contains `not implemented yet`.
@@ -107,7 +107,7 @@ Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contai
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
+  -d '{"model": "rag-hybrid-reranked", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
 ```
 
 Expected: SSE `data:` frames with `delta` role then content, ending with `data: [DONE]`.
@@ -222,3 +222,13 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/
 ```
 
 Expected: the stream's final line is `data: [DONE]`, preceded by a chunk with `"finish_reason": "stop"`. Wrong Bearer returns 401 with `"code":"invalid_api_key"`.
+
+## Story 4.1 — Hybrid search
+
+```bash
+uv run python -m building_with_rag.ingestion.keyword_index   # ends: chunk_text_index READY queryable
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question":"criminal breach of trust","pattern":"hybrid","limit":5}'   | jq '{status, t: (.trace | {semantic, keyword, fusion, contribution}), r: [.results[] | {section_id, score, sr: .semantic_rank, kr: .keyword_rank, fr: .fused_rank, text: .text[:60]}]}'
+curl -sN http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json"   -d '{"model":"rag-hybrid","stream":true,"messages":[{"role":"user","content":"criminal breach of trust"}]}' | head -c 1500
+```
+
+Expected: `status` `ok`, results in non-increasing `score`, each with a `semantic_rank` or `keyword_rank`; chat shows DRAFT, confidence, Sources. `hybrid-reranked`, `structured`, `decomposition`, `hyde` still `not_implemented`.

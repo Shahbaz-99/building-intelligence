@@ -71,6 +71,13 @@ class RetrievedChunk(BaseModel):
     source_pdf: str | None = None
     source_sha256: str | None = None
     needs_review: bool | None = None
+    # Story 4.1 hybrid-only route evidence; None when the route did not return the chunk.
+    semantic_score: float | None = None
+    semantic_rank: int | None = None
+    keyword_score: float | None = None
+    keyword_rank: int | None = None
+    fused_score: float | None = None
+    fused_rank: int | None = None
 
 
 class GenerationClaim(BaseModel):

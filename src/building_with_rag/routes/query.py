@@ -1,9 +1,9 @@
-"""Query endpoint: shared retrieve + answer path; non-semantic modes stay placeholders."""
+"""Query endpoint: shared retrieve + answer path; other modes stay placeholders."""
 
 from fastapi import APIRouter
 
 from building_with_rag.contracts import QueryRequest, QueryResult
-from building_with_rag.pipeline import retrieve, run_generation
+from building_with_rag.pipeline import REAL_PATTERNS, retrieve, run_generation
 
 router = APIRouter()
 
@@ -22,7 +22,7 @@ _LOW_CONFIDENCE_MESSAGE = (
 @router.post("/v1/query")
 def query(request: QueryRequest) -> QueryResult:
     result = retrieve(request)
-    if request.generate_answer and result.pattern == "semantic":
+    if request.generate_answer and result.pattern in REAL_PATTERNS:
         result.generation = run_generation(request.question, result)
         note = (
             _LOW_CONFIDENCE_MESSAGE

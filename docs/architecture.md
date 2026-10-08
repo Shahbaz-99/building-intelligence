@@ -42,7 +42,7 @@ One shared registry (single source of truth) holds only:
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
 
-`semantic` is real on `POST /v1/query` (Story 2.3); chat for `rag-semantic` runs the same path with streamed answers (Story 3.2); every other mode still returns an honest `not_implemented` placeholder until its own story adds behavior.
+`semantic` (Story 2.3) and `hybrid` (Story 4.1) are real on `POST /v1/query`; chat for `rag-semantic` and `rag-hybrid` runs the same path with streamed answers (Story 3.2); every other mode still returns an honest `not_implemented` placeholder until its own story adds behavior.
 
 ## API contracts
 
@@ -68,12 +68,12 @@ The classroom seed may resolve only its fixed local demo caller, but keeps `call
 
 ### `RetrievedChunk`
 
-A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text`, `heading`, `score`, and available source fields. Later stories add only the existing hybrid/rerank fields.
+A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text`, `heading`, `score`, and available source fields. Hybrid adds optional `semantic_score/rank`, `keyword_score/rank`, `fused_score/rank` (all `None` in semantic mode).
 
 ### Endpoints
 
 - `GET /healthz` — safe, no credentials required.
-- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`; `semantic` goes to `retrieval/semantic.py`, other modes return the `run_pattern` placeholder.
+- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`; `semantic` goes to `retrieval/semantic.py`, `hybrid` to `retrieval/hybrid.py`, other modes return the `run_pattern` placeholder.
 - `GET /v1/models` — lists the six `rag-<pattern>` model IDs.
 - `POST /v1/chat/completions` — OpenAI-compatible, text-only `ChatCompletionRequest`: `model`, `messages` with `system`/`developer`/`user`/`assistant` roles, `stream`, `n`, and optional strict `rag_options` (`pattern`, list filters, `limit`, `required_acts`, `chapter`).
 
@@ -99,7 +99,7 @@ curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d 
 
 ## Context and answer boundaries (Story 3.1)
 
-Flow: semantic result -> bounded labelled context (`generation/context.py`: max 5 passages, 12,000 chars, labels `E1..`, no mid-text cuts) -> one `POST {GENERATION_API_BASE_URL}/chat/completions` (`generation/answer.py`, httpx, 30 s, no retries) -> strict JSON parse -> citations resolved from supplied context only.
+Flow: semantic or hybrid result -> bounded labelled context (`generation/context.py`: max 5 passages, 12,000 chars, labels `E1..`, no mid-text cuts) -> one `POST {GENERATION_API_BASE_URL}/chat/completions` (`generation/answer.py`, httpx, 30 s, no retries) -> strict JSON parse -> citations resolved from supplied context only.
 
 - Outcomes (`GenerationResult.outcome`): `answered` (text, claims, citations, supporting passages), `insufficient_evidence` (also when no passages; no model call), `unavailable` (missing settings, timeout, connection error, non-2xx), `malformed` (non-JSON, no `choices`, unknown label, rule violation; no repair or retry). Non-answered outcomes carry empty text, claims, citations.
 - HTTP 200 for unavailable/malformed; retrieval `results` and `status` are unchanged. No URL or key in messages or trace.
@@ -157,3 +157,16 @@ Each record has 14 fields: `section_id`, `act`, `act_label`, `status`, `chapter`
 - Chat labels: `DRAFT — checking evidence`, `Evidence check passed — confidence: high` + `Sources:` lines (`E1 · BNS §303 · Theft · bns:303`), `DRAFT — low confidence, not the final answer.` + reason and failed checks. Drafts cannot be retracted once streamed.
 - Failure after text began: final line `Answer generation unavailable — the text above is an unchecked draft.`, then `stop` and `[DONE]`; HTTP stays 200 once streaming starts. Errors before streaming (auth, model, retrieval) use the OpenAI-style envelope.
 - `CAPSTONE_API_KEY`: when non-empty, `/v1/chat/completions` requires `Authorization: Bearer <key>` (constant-time compare, 401 `invalid_api_key`). Empty = no check. Other endpoints unchanged.
+
+## Hybrid retrieval (Story 4.1)
+
+- Mechanism: Atlas Search `$search` with the `text` operator (BM25, `{$meta: "searchScore"}`) on `chunks.text`; not `$text`, not `vectorSearch`.
+- Index `chunk_text_index` on `chunks` (definition: `KEYWORD_INDEX_DEFINITION` in `ingestion/mongodb_schema.py`; `text` `lucene.standard`, `act`/`status`/`access_level` token). Create/reuse: `uv run python -m building_with_rag.ingestion.keyword_index`. A differing index is reported, never replaced.
+- Filters: `$search.compound.filter` with `in` on the token fields; same effective filters as semantic (`access_level=["public"]` fixed; caller lists narrow only). The question is only the `text.query` value.
+- Fusion: Reciprocal Rank Fusion over ranks. `ROUTE_DEPTH = max(limit, min(50, max(20, 4*limit)))` per route; `fused_score = sum 1/(RRF_K + rank)`, `RRF_K = 60`, equal weights. Order: fused desc, `semantic_rank` (missing last), `chunk_id`. Fused by `chunk_id`; `fused_rank` = position. `score` = `fused_score`.
+- `RetrievedChunk` fields: `semantic_score`, `semantic_rank`, `keyword_score`, `keyword_rank`, `fused_score`, `fused_rank`; a route that did not return the chunk leaves its pair `None`.
+- Trace: `mode`, `query`, `embedding`, `filters`, `caller_id`, `result_count`, `unresolved_hits`, `semantic`, `keyword`, `fusion`, `contribution` (`both`/`semantic_only`/`keyword_only`).
+- Outcomes: `ok`, `no_results` (both routes empty); 503 `retrieval_not_ready` (keyword or vector index missing/not queryable); 502 `retrieval_upstream_error`. No silent fallback to semantic.
+- Limitation: rank-only fusion ignores score magnitude; `text` matches any query term (OR), so long questions pull in common words; section numbers match only inside chunk `text`; no stemming/synonyms beyond the standard analyzer.
+- Diagnostic: `curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"<q>","pattern":"hybrid","limit":5}'`; read `trace.contribution` and per-result `semantic_rank`/`keyword_rank`/`fused_rank` (truncate `text`).
+- Limitations update: Atlas required; no `$text`. The Atlas Search index `chunk_text_index` on `chunks` replaces "no keyword/hybrid index fields".

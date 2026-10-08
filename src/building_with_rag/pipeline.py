@@ -5,8 +5,10 @@ from collections.abc import Iterator
 from building_with_rag.contracts import GenerationResult, QueryRequest, QueryResult
 from building_with_rag.generation.answer import stream_answer
 from building_with_rag.registry import Pattern, run_pattern
+from building_with_rag.retrieval.hybrid import run_hybrid
 from building_with_rag.retrieval.semantic import run_semantic
 
+REAL_PATTERNS = frozenset({Pattern.SEMANTIC.value, Pattern.HYBRID.value})
 UNAVAILABLE_AFTER_TEXT = "\n\nAnswer generation unavailable — the text above is an unchecked draft."
 UNAVAILABLE_NO_TEXT = "Answer generation unavailable."
 
@@ -14,11 +16,13 @@ UNAVAILABLE_NO_TEXT = "Answer generation unavailable."
 def retrieve(request: QueryRequest) -> QueryResult:
     if request.pattern is Pattern.SEMANTIC:
         return QueryResult(**run_semantic(request))
+    if request.pattern is Pattern.HYBRID:
+        return run_hybrid(request)
     return QueryResult(**run_pattern(request.pattern, request.question, request.caller_id))
 
 
 def generation_applies(retrieval: QueryResult) -> bool:
-    return retrieval.pattern == Pattern.SEMANTIC.value
+    return retrieval.pattern in REAL_PATTERNS
 
 
 def answer_events(

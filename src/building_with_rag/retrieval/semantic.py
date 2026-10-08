@@ -111,16 +111,79 @@ def effective_filters(request: QueryRequest) -> dict[str, list[str]]:
 
 
 def check_scope(request: QueryRequest) -> None:
-    """Reject scope semantic mode cannot honour (HTTP 422)."""
+    """Reject scope semantic/hybrid mode cannot honour (HTTP 422)."""
     problems = []
     if request.caller_id is not None and request.caller_id != get_settings().webui_demo_caller_id:
         problems.append("caller_id does not match the effective caller")
     if request.required_acts is not None:
-        problems.append("required_acts is not supported by semantic mode")
+        problems.append("required_acts is not supported by this mode")
     if request.chapter is not None:
-        problems.append("chapter is not supported by semantic mode")
+        problems.append("chapter is not supported by this mode")
     if problems:
         raise HTTPException(status_code=422, detail="; ".join(problems) + ".")
+
+
+def embed_query(voyage: VoyageClient, question: str) -> list[float]:
+    try:
+        vector = voyage.embed([question], model=EMBEDDING_MODEL, input_type="query").embeddings[0]
+    except VoyageError:
+        raise _upstream("Voyage embedding request failed.") from None
+    if len(vector) != EMBEDDING_DIMENSIONS:
+        raise _not_ready(
+            f"Query embedding has {len(vector)} dimensions, expected {EMBEDDING_DIMENSIONS}."
+        )
+    return vector
+
+
+def vector_search(db, vector: list[float], filters: dict, limit: int, n_cand: int) -> list[dict]:
+    pipeline = [
+        {
+            "$vectorSearch": {
+                "index": VECTOR_INDEX_NAME,
+                "path": "vector",
+                "queryVector": vector,
+                "numCandidates": n_cand,
+                "limit": limit,
+                "filter": {k: {"$in": v} for k, v in filters.items()},
+            }
+        },
+        {"$project": {"_id": 0, "chunk_id": 1, "score": {"$meta": "vectorSearchScore"}}},
+    ]
+    return list(db[EMBEDDINGS_COLLECTION].aggregate(pipeline))
+
+
+def resolve_sections(db, hits: list[dict]) -> tuple[dict, dict]:
+    chunks = {
+        c["chunk_id"]: c
+        for c in db[CHUNKS_COLLECTION].find({"chunk_id": {"$in": [h["chunk_id"] for h in hits]}})
+    }
+    section_ids = list({c["section_id"] for c in chunks.values()})
+    sections = {
+        s["section_id"]: s
+        for s in db[SECTIONS_COLLECTION].find({"section_id": {"$in": section_ids}})
+    }
+    return chunks, sections
+
+
+def chunk_result(chunk: dict, section: dict, score: float, **extra) -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=chunk["chunk_id"],
+        section_id=section["section_id"],
+        act=section["act"],
+        text=chunk["text"],
+        heading=section.get("heading") or "",
+        score=score,
+        chunk_index=chunk.get("chunk_index"),
+        act_label=section.get("act_label"),
+        status=section.get("status"),
+        chapter=section.get("chapter"),
+        chapter_title=section.get("chapter_title"),
+        section_number=section.get("section_number"),
+        source_pdf=section.get("source_pdf"),
+        source_sha256=section.get("source_sha256"),
+        needs_review=section.get("needs_review"),
+        **extra,
+    )
 
 
 def run_semantic(request: QueryRequest) -> dict:
@@ -132,41 +195,10 @@ def run_semantic(request: QueryRequest) -> dict:
     _check_ready(db)
 
     n_cand = num_candidates(request.limit)
+    vector = embed_query(voyage, request.question)
     try:
-        vector = voyage.embed(
-            [request.question], model=EMBEDDING_MODEL, input_type="query"
-        ).embeddings[0]
-    except VoyageError:
-        raise _upstream("Voyage embedding request failed.") from None
-    if len(vector) != EMBEDDING_DIMENSIONS:
-        raise _not_ready(
-            f"Query embedding has {len(vector)} dimensions, expected {EMBEDDING_DIMENSIONS}."
-        )
-
-    pipeline = [
-        {
-            "$vectorSearch": {
-                "index": VECTOR_INDEX_NAME,
-                "path": "vector",
-                "queryVector": vector,
-                "numCandidates": n_cand,
-                "limit": request.limit,
-                "filter": {k: {"$in": v} for k, v in filters.items()},
-            }
-        },
-        {"$project": {"_id": 0, "chunk_id": 1, "score": {"$meta": "vectorSearchScore"}}},
-    ]
-    try:
-        hits = list(db[EMBEDDINGS_COLLECTION].aggregate(pipeline))
-        chunks = {
-            c["chunk_id"]: c
-            for c in db[CHUNKS_COLLECTION].find({"chunk_id": {"$in": [h["chunk_id"] for h in hits]}})
-        }
-        section_ids = list({c["section_id"] for c in chunks.values()})
-        sections = {
-            s["section_id"]: s
-            for s in db[SECTIONS_COLLECTION].find({"section_id": {"$in": section_ids}})
-        }
+        hits = vector_search(db, vector, filters, request.limit, n_cand)
+        chunks, sections = resolve_sections(db, hits)
     except PyMongoError:
         _reset_ready()
         raise _upstream("MongoDB query failed.") from None
@@ -179,25 +211,7 @@ def run_semantic(request: QueryRequest) -> dict:
         if chunk is None or section is None:
             unresolved += 1
             continue
-        results.append(
-            RetrievedChunk(
-                chunk_id=chunk["chunk_id"],
-                section_id=section["section_id"],
-                act=section["act"],
-                text=chunk["text"],
-                heading=section.get("heading") or "",
-                score=hit["score"],
-                chunk_index=chunk.get("chunk_index"),
-                act_label=section.get("act_label"),
-                status=section.get("status"),
-                chapter=section.get("chapter"),
-                chapter_title=section.get("chapter_title"),
-                section_number=section.get("section_number"),
-                source_pdf=section.get("source_pdf"),
-                source_sha256=section.get("source_sha256"),
-                needs_review=section.get("needs_review"),
-            )
-        )
+        results.append(chunk_result(chunk, section, hit["score"]))
 
     trace = {
         "mode": "semantic",
