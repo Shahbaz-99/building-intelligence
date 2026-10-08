@@ -58,6 +58,14 @@ only allowed from `127.0.0.1`).
    save, and send a question. Hover the chip and click `×` to turn it off;
    re-enable it from the integrations menu next to `+`.
 
+## Reading answers
+
+- `DRAFT — checking evidence` precedes every answer attempt; text streams before it is checked, so it cannot be retracted.
+- `Check failed: ... Retrying (attempt 2 of 2)…` means the first draft failed validation; the next draft supersedes it in meaning, not on screen.
+- `Evidence check passed — confidence: high` plus `Sources:` marks the validated answer. `DRAFT — low confidence, not the final answer.` means no validated answer exists.
+- Pairing: Pipe Valve `capstone_api_key` must equal the API's `CAPSTONE_API_KEY` (both empty = no auth).
+- After editing the Pipe, re-paste it via Function Menu → Edit and save.
+
 ## Safe cleanup
 
 If you want to remove this incomplete local shell, first stop the server, then

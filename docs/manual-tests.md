@@ -97,7 +97,7 @@ Expected: 422 validation error (question below min_length 1).
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-semantic", "messages": [{"role": "user", "content": "What is theft?"}]}'
+  -d '{"model": "rag-hybrid", "messages": [{"role": "user", "content": "What is theft?"}]}'
 ```
 
 Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contains `not implemented yet`.
@@ -107,7 +107,7 @@ Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contai
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-semantic", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
+  -d '{"model": "rag-hybrid", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
 ```
 
 Expected: SSE `data:` frames with `delta` role then content, ending with `data: [DONE]`.
@@ -193,3 +193,32 @@ curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
 ```
 
 Expected: `status` `ok`, `generation` null.
+
+## Story 3.2 — Streamed Answers with Confidence
+
+What it adds: `/v1/chat/completions` for `rag-semantic` streams a grounded answer (`DRAFT` line, labelled text, confidence/sources footer) from the same result as `/v1/query`.
+
+Prerequisite: start the API as in Story 1.1; `.env` needs `GENERATION_API_BASE_URL` and `GENERATION_API_KEY` (never print them). Add `-H "Authorization: Bearer <key>"` only if `CAPSTONE_API_KEY` is set.
+
+```bash
+# Supported question, streamed
+curl -sN http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json"   -d '{"model":"rag-semantic","stream":true,"messages":[{"role":"user","content":"What is the punishment for theft under the BNS?"}]}'   | grep '^data: {' | sed 's/^data: //' | jq -rj '.choices[0].delta.content // empty' | head -c 1500
+
+# Unsupported question, streamed
+curl -sN http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json"   -d '{"model":"rag-semantic","stream":true,"messages":[{"role":"user","content":"What is the GST rate on restaurant services?"}]}'   | grep '^data: {' | sed 's/^data: //' | jq -rj '.choices[0].delta.content // empty' | head -c 1500
+
+# Same question on /v1/query for comparison
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question":"What is the punishment for theft under the BNS?","pattern":"semantic","limit":5,"generate_answer":true}'   | jq '{status, g: (.generation | {outcome, confidence, attempts, issues, citations: [.citations[] | {label, section_id}]})}'
+```
+
+Expected: first command prints `DRAFT — checking evidence`, answer text with `[E1]`-style labels, then `Evidence check passed — confidence: high` and `Sources:` lines. Second prints one insufficient-evidence sentence and no confidence. Third shows `status` `ok`, `outcome` `answered`, `confidence` `high`, and the same citations.
+
+```bash
+# Stream shape: ends with [DONE]
+curl -sN http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json"   -d '{"model":"rag-semantic","stream":true,"messages":[{"role":"user","content":"What is theft?"}]}' | tail -n 3
+
+# Failure: wrong Bearer (only when CAPSTONE_API_KEY is set)
+curl -s http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json"   -H "Authorization: Bearer wrong"   -d '{"model":"rag-semantic","messages":[{"role":"user","content":"What is theft?"}]}'
+```
+
+Expected: the stream's final line is `data: [DONE]`, preceded by a chunk with `"finish_reason": "stop"`. Wrong Bearer returns 401 with `"code":"invalid_api_key"`.

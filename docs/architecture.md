@@ -42,7 +42,7 @@ One shared registry (single source of truth) holds only:
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
 
-`semantic` is real on `POST /v1/query` (Story 2.3); chat for `rag-semantic` and every other mode still return honest `not_implemented` placeholders until their own stories add behavior.
+`semantic` is real on `POST /v1/query` (Story 2.3); chat for `rag-semantic` runs the same path with streamed answers (Story 3.2); every other mode still returns an honest `not_implemented` placeholder until its own story adds behavior.
 
 ## API contracts
 
@@ -77,7 +77,7 @@ A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text
 - `GET /v1/models` — lists the six `rag-<pattern>` model IDs.
 - `POST /v1/chat/completions` — OpenAI-compatible, text-only `ChatCompletionRequest`: `model`, `messages` with `system`/`developer`/`user`/`assistant` roles, `stream`, `n`, and optional strict `rag_options` (`pattern`, list filters, `limit`, `required_acts`, `chapter`).
 
-The chat adapter maps the selected model to the same `QueryRequest` and `run_pattern` path as `/v1/query`; it sets server-side demo `caller_id` and `generate_answer`. Supports normal OpenAI Chat Completions JSON responses and role/content/stop frames, plus the OpenAI-style error envelope before streaming begins. No duplicated implementations, no custom SSE events that Open WebUI cannot render.
+The chat adapter maps the selected model to the same `QueryRequest` and shared `pipeline.retrieve` + `answer_events` path as `/v1/query`; it sets server-side demo `caller_id` and `generate_answer`, and accepts the Pipe's nested `rag_options.filters.{act,status}` as well as flat `act`/`status`. Supports normal OpenAI Chat Completions JSON responses and role/content/stop frames, plus the OpenAI-style error envelope before streaming begins. No duplicated implementations, no custom SSE events that Open WebUI cannot render.
 
 ## Semantic retrieval (Story 2.3)
 
@@ -105,13 +105,13 @@ Flow: semantic result -> bounded labelled context (`generation/context.py`: max 
 - HTTP 200 for unavailable/malformed; retrieval `results` and `status` are unchanged. No URL or key in messages or trace.
 - Added optional `GenerationResult` fields: `outcome`, `claims`, `citations`, `supporting_passages`, `provider`, `trace`, `context_outcome`.
 - Evidence is untrusted source text, never instructions. No claims of current legal applicability beyond the supplied BNS/IPC documents.
-- Chat (`/v1/chat/completions`) keeps its placeholder; chat answers and streaming are Story 3.2.
+- The single-call JSON flow above is superseded by the streamed flow in Story 3.2 below.
 
 ## Open WebUI (trainer-supplied, separate client)
 
 The trainer-supplied Open WebUI bundle is the chat client, run separately from the capstone API. Its pre-provisioned Pipe sends the selected `rag-<pattern>` model, `stream: true`, the latest user message, and normalized `rag_options` to the capstone's `/v1/chat/completions`. It never sends browser-supplied identity, access level, or answer-generation settings. The capstone's adapter accepts that exact request and uses server-side `caller_id`/`generate_answer`.
 
-`/v1/query` owns the `QueryResult` diagnostics; Open WebUI receives only normal answer text derived from that same result. Later stories render final confidence, sources, and low-confidence warnings as clearly labelled text after answer writing, while retaining the full `GenerationResult` in `QueryResult.generation`.
+`/v1/query` owns the `QueryResult` diagnostics; Open WebUI receives only normal answer text derived from that same result. Final confidence, sources, and low-confidence warnings render as labelled text after answer writing (Story 3.2); the full `GenerationResult` stays in `QueryResult.generation`.
 
 ## Environment
 
@@ -146,3 +146,14 @@ Each record has 14 fields: `section_id`, `act`, `act_label`, `status`, `chapter`
 - **IPC footnotes**: Amendment footnotes and historical annotations are interleaved with section text and may appear as inline artifacts in section `text`.
 - **BNS chapter markers**: Chapter boundaries are detected from `CHAPTER <roman>` lines in the body text. The BNS index (pages 2–19) provides section headings; the correspondence table (pages 20–73) is skipped.
 - **Source-hash safety rule**: If a source PDF hash changes, the corpus for that act is regenerated as an atomic replacement. Records from different PDF versions are never mixed in one corpus file.
+
+## Streamed answers and confidence (Story 3.2)
+
+- Shared path: `pipeline.retrieve` -> `pipeline.answer_events` (`generation/answer.py: stream_answer`). `/v1/query` drains the events into `QueryResult.generation`; chat forwards `text`/`notice` events as SSE content chunks and appends a footer from the same final `GenerationResult`. One request = one generation/validation operation. Retrieval and context assembly are not streamed.
+- Event flow: per attempt, `notice` `DRAFT — checking evidence`, streamed `text`, validation; failed non-final attempt -> `notice` `Check failed: ... Retrying (attempt 2 of 2)…`; last event `final`. The first characters are buffered so `INSUFFICIENT_EVIDENCE: <reason>` is never streamed as an answer.
+- `MAX_ATTEMPTS = 2`. Checks per attempt, in order: `citation_labels` (all labels supplied), `claim_cited` (every sentence/bullet has a label, text non-empty), `support` (one non-streamed validator call, `temperature: 0`; skipped when the first two fail). Invalid citations are never stripped.
+- New `GenerationResult` fields: `confidence` (`high` = final attempt passed; `low` = final attempt failed a check; absent = nothing judged), `issues` (`attempt`, `check`, `detail`, all attempts), `attempts` (`attempt`, `status`, `chars`, `latency_ms`), `draft_answer` (last unpassed text), `low_confidence_reason`.
+- Outcome mapping: passed -> `answered` (+ `high`); failed final check -> `malformed`, empty `text`, `draft_answer`, `low`; provider failure -> `unavailable`; validator unreachable -> `unavailable` with `draft_answer`; validator invalid reply -> `malformed`; `insufficient_evidence` and empty context unchanged.
+- Chat labels: `DRAFT — checking evidence`, `Evidence check passed — confidence: high` + `Sources:` lines (`E1 · BNS §303 · Theft · bns:303`), `DRAFT — low confidence, not the final answer.` + reason and failed checks. Drafts cannot be retracted once streamed.
+- Failure after text began: final line `Answer generation unavailable — the text above is an unchecked draft.`, then `stop` and `[DONE]`; HTTP stays 200 once streaming starts. Errors before streaming (auth, model, retrieval) use the OpenAI-style envelope.
+- `CAPSTONE_API_KEY`: when non-empty, `/v1/chat/completions` requires `Authorization: Bearer <key>` (constant-time compare, 401 `invalid_api_key`). Empty = no check. Other endpoints unchanged.

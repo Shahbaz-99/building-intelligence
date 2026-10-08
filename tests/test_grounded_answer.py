@@ -1,50 +1,20 @@
-import json
-
-import pytest
-
 from building_with_rag.contracts import RetrievedChunk
-from building_with_rag.generation.answer import (
-    MalformedOutput,
-    _resolve,
-    parse_model_output,
-)
-
-LABELS = {"E1", "E2"}
+from building_with_rag.generation.answer import _resolve, split_claims
 
 
-def _payload(**over):
-    data = {
-        "outcome": "answered",
-        "answer": "Theft is punishable.",
-        "claims": [{"text": "Theft punished", "evidence": ["E2"]}],
-        "reason": "",
-    }
-    data.update(over)
-    return json.dumps(data)
+def test_split_claims_labels_and_bullets():
+    claims = split_claims(
+        "Intro:\n- Theft is punished [E2].\n- Other point. [E1, E3]\nNo label here."
+    )
+    assert [c.evidence_labels for c in claims] == [["E2"], ["E1", "E3"], []]
+    assert claims[0].text == "Theft is punished ."
 
 
-def test_unknown_label_malformed():
-    bad = _payload(claims=[{"text": "x", "evidence": ["E9"]}])
-    with pytest.raises(MalformedOutput):
-        parse_model_output(bad, LABELS)
-
-
-def test_non_json_malformed():
-    with pytest.raises(MalformedOutput):
-        parse_model_output("not json", LABELS)
-
-
-def test_answered_without_claims_malformed():
-    with pytest.raises(MalformedOutput):
-        parse_model_output(_payload(claims=[]), LABELS)
-
-
-def test_valid_answered_resolves_citations():
-    parsed = parse_model_output("```json\n" + _payload() + "\n```", LABELS)
+def test_resolve_skips_unknown_labels():
     chunk = RetrievedChunk(
         chunk_id="c2", section_id="bns:303", act="BNS_2023", text="t", heading="Theft", score=0.5
     )
-    claims, citations, passages = _resolve(parsed, {"E1": chunk, "E2": chunk})
-    assert claims[0].evidence_labels == ["E2"]
+    claims = split_claims("Theft punished [E2][E9].")
+    citations, passages = _resolve(claims, {"E2": chunk})
     assert [c.section_id for c in citations] == ["bns:303"]
     assert passages == [chunk]

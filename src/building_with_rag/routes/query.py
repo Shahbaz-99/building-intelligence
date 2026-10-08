@@ -1,11 +1,9 @@
-"""Query endpoint: semantic is real; other modes use the shared run_pattern placeholder."""
+"""Query endpoint: shared retrieve + answer path; non-semantic modes stay placeholders."""
 
 from fastapi import APIRouter
 
 from building_with_rag.contracts import QueryRequest, QueryResult
-from building_with_rag.generation.answer import generate_answer
-from building_with_rag.registry import Pattern, run_pattern
-from building_with_rag.retrieval.semantic import run_semantic
+from building_with_rag.pipeline import retrieve, run_generation
 
 router = APIRouter()
 
@@ -15,15 +13,21 @@ _OUTCOME_MESSAGES = {
     "unavailable": "Answer generation is unavailable; retrieved passages are still returned.",
     "malformed": "Generation output was invalid and discarded; retrieved passages are returned.",
 }
+_LOW_CONFIDENCE_MESSAGE = (
+    "Answer failed the evidence check and is returned only as a low-confidence draft; "
+    "retrieved passages are returned."
+)
 
 
 @router.post("/v1/query")
 def query(request: QueryRequest) -> QueryResult:
-    if request.pattern is Pattern.SEMANTIC:
-        result = QueryResult(**run_semantic(request))
-        if request.generate_answer:
-            result.generation = generate_answer(request.question, result.results)
-            result.message = f"{result.message} {_OUTCOME_MESSAGES[result.generation.outcome]}"
-        return result
-    payload = run_pattern(request.pattern, request.question, request.caller_id)
-    return QueryResult(**payload)
+    result = retrieve(request)
+    if request.generate_answer and result.pattern == "semantic":
+        result.generation = run_generation(request.question, result)
+        note = (
+            _LOW_CONFIDENCE_MESSAGE
+            if result.generation.confidence == "low"
+            else _OUTCOME_MESSAGES[result.generation.outcome]
+        )
+        result.message = f"{result.message} {note}"
+    return result
