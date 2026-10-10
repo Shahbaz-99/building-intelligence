@@ -1,10 +1,12 @@
-"""Minimal smoke tests: seed behavior only (health, placeholders, models, chat)."""
+"""Minimal smoke tests: health, models, chat framing (no mode is a placeholder)."""
 
 import pytest
 from fastapi.testclient import TestClient
 
 from building_with_rag.app import create_app
+from building_with_rag.contracts import QueryResult
 from building_with_rag.registry import PATTERN_MODEL_IDS
+from building_with_rag.routes import chat
 
 
 @pytest.fixture()
@@ -12,24 +14,21 @@ def client() -> TestClient:
     return TestClient(create_app())
 
 
+@pytest.fixture()
+def non_ok_retrieval(monkeypatch) -> None:
+    monkeypatch.setattr(
+        chat,
+        "retrieve",
+        lambda r: QueryResult(
+            pattern=r.pattern.value, status="clarify", message="Need more.", trace={}
+        ),
+    )
+
+
 def test_healthz(client: TestClient) -> None:
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
-
-
-@pytest.mark.parametrize(
-    "pattern,model_id", [(p, m) for p, m in PATTERN_MODEL_IDS.items() if p.value not in ("semantic", "hybrid", "hybrid-reranked", "structured")]
-)
-def test_query_placeholder_per_mode(client: TestClient, pattern: str, model_id: str) -> None:
-    response = client.post(
-        "/v1/query", json={"question": "What is theft?", "pattern": pattern.value}
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["pattern"] == pattern.value
-    assert body["status"] == "not_implemented"
-    assert body["results"] == []
 
 
 def test_models_lists_six(client: TestClient) -> None:
@@ -39,19 +38,19 @@ def test_models_lists_six(client: TestClient) -> None:
     assert ids == list(PATTERN_MODEL_IDS.values())
 
 
-def test_chat_json_placeholder(client: TestClient) -> None:
+@pytest.mark.parametrize("model", ["rag-decomposition", "rag-hyde"])
+def test_chat_json_non_ok_message(client: TestClient, non_ok_retrieval, model: str) -> None:
     response = client.post(
         "/v1/chat/completions",
-        json={"model": "rag-decomposition", "messages": [{"role": "user", "content": "Hi"}]},
+        json={"model": model, "messages": [{"role": "user", "content": "Hi"}]},
     )
     assert response.status_code == 200
     body = response.json()
     assert body["object"] == "chat.completion"
-    assert body["choices"][0]["message"]["role"] == "assistant"
-    assert "not implemented" in body["choices"][0]["message"]["content"]
+    assert body["choices"][0]["message"]["content"] == "Need more."
 
 
-def test_chat_stream_placeholder(client: TestClient) -> None:
+def test_chat_stream_non_ok_message(client: TestClient, non_ok_retrieval) -> None:
     with client.stream(
         "POST",
         "/v1/chat/completions",
@@ -67,12 +66,3 @@ def test_chat_stream_placeholder(client: TestClient) -> None:
     assert '"finish_reason": "stop"' in raw
     done = "[" + "DONE" + "]"
     assert raw.strip().endswith("data: " + done)
-
-
-def test_chat_unknown_model_error(client: TestClient) -> None:
-    response = client.post(
-        "/v1/chat/completions",
-        json={"model": "gpt-bogus", "messages": [{"role": "user", "content": "Hi"}]},
-    )
-    assert response.status_code == 400
-    assert response.json()["detail"]["error"]["type"] == "invalid_request_error"

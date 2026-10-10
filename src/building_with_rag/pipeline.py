@@ -5,7 +5,9 @@ from collections.abc import Iterator
 from building_with_rag.contracts import GenerationResult, QueryRequest, QueryResult
 from building_with_rag.generation.answer import stream_answer
 from building_with_rag.registry import Pattern, run_pattern
+from building_with_rag.retrieval.decomposition import run_decomposition
 from building_with_rag.retrieval.hybrid import run_hybrid
+from building_with_rag.retrieval.hyde import run_hyde
 from building_with_rag.retrieval.rerank import run_hybrid_reranked
 from building_with_rag.retrieval.semantic import run_semantic
 from building_with_rag.retrieval.structured import run_structured
@@ -16,7 +18,12 @@ REAL_PATTERNS = frozenset(
         Pattern.HYBRID.value,
         Pattern.HYBRID_RERANKED.value,
         Pattern.STRUCTURED.value,
+        Pattern.DECOMPOSITION.value,
+        Pattern.HYDE.value,
     }
+)
+_OK_ONLY = frozenset(
+    {Pattern.STRUCTURED.value, Pattern.DECOMPOSITION.value, Pattern.HYDE.value}
 )
 UNAVAILABLE_AFTER_TEXT = "\n\nAnswer generation unavailable — the text above is an unchecked draft."
 UNAVAILABLE_NO_TEXT = "Answer generation unavailable."
@@ -31,11 +38,15 @@ def retrieve(request: QueryRequest) -> QueryResult:
         return run_hybrid_reranked(request)
     if request.pattern is Pattern.STRUCTURED:
         return run_structured(request)
+    if request.pattern is Pattern.DECOMPOSITION:
+        return run_decomposition(request)
+    if request.pattern is Pattern.HYDE:
+        return run_hyde(request)
     return QueryResult(**run_pattern(request.pattern, request.question, request.caller_id))
 
 
 def generation_applies(retrieval: QueryResult) -> bool:
-    if retrieval.pattern == Pattern.STRUCTURED.value:
+    if retrieval.pattern in _OK_ONLY:
         return retrieval.status == "ok"
     return retrieval.pattern in REAL_PATTERNS
 

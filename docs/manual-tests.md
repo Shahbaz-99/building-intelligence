@@ -2,7 +2,7 @@
 
 ## Story 1.1 — Architecture and Project Seed
 
-What it adds: FastAPI project seed with health, query, model-listing, and OpenAI-compatible chat endpoints — all returning honest `not_implemented` placeholders.
+What it adds: FastAPI project seed with health, query, model-listing, and OpenAI-compatible chat endpoints — placeholders at the time; every mode is real as of Story 5.2.
 
 Prerequisite: start the API — `uv run uvicorn building_with_rag.app:app --host 127.0.0.1 --port 8000`
 
@@ -52,36 +52,6 @@ curl -s http://127.0.0.1:8000/v1/query \
 
 Expected (needs `.env` incl. `RERANK_API_KEY`): `"status":"ok"`, `results` ordered by `rerank_rank` with `score == rerank_score`, cut candidates in `omitted_candidates` with `omitted_reason`. Empty `RERANK_API_KEY`: HTTP 503 `retrieval_not_ready`.
 
-### Query — decomposition
-
-```bash
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "decomposition"}'
-```
-
-Expected: `"status":"not_implemented"`, message references `decomposition`.
-
-### Query — decomposition
-
-```bash
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "decomposition"}'
-```
-
-Expected: `"status":"not_implemented"`, message references `decomposition`.
-
-### Query — hyde
-
-```bash
-curl -s http://127.0.0.1:8000/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "hyde"}'
-```
-
-Expected: `"status":"not_implemented"`, message references `hyde`.
-
 ### Query — empty question (failure)
 
 ```bash
@@ -97,17 +67,17 @@ Expected: 422 validation error (question below min_length 1).
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-decomposition", "messages": [{"role": "user", "content": "What is theft?"}]}'
+  -d '{"model": "rag-semantic", "messages": [{"role": "user", "content": "What is theft?"}]}'
 ```
 
-Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contains `not implemented yet`.
+Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content is a streamed-path answer (see Story 3.1/3.2).
 
 ### Chat completions — streaming
 
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-decomposition", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
+  -d '{"model": "rag-semantic", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
 ```
 
 Expected: SSE `data:` frames with `delta` role then content, ending with `data: [DONE]`.
@@ -231,7 +201,7 @@ curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d 
 curl -sN http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json"   -d '{"model":"rag-hybrid","stream":true,"messages":[{"role":"user","content":"criminal breach of trust"}]}' | head -c 1500
 ```
 
-Expected: `status` `ok`, results in non-increasing `score`, each with a `semantic_rank` or `keyword_rank`; chat shows DRAFT, confidence, Sources. `decomposition`, `hyde` still `not_implemented`.
+Expected: `status` `ok`, results in non-increasing `score`, each with a `semantic_rank` or `keyword_rank`; chat shows DRAFT, confidence, Sources.
 
 ## Story 4.2 — Hybrid re-ranking
 
@@ -252,3 +222,13 @@ curl -sN http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application
 ```
 
 Expected: `ok` + `bns:103`, `ok` + `ipc:302`, `clarification_needed` (no MongoDB call), `not_found` (MongoDB called), `recommendation` (no MongoDB call). Chat: DRAFT/confidence/Sources for the first; plain clarification text for `section 103`.
+
+## Story 5.2 — Decomposition and HyDE
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"How does BNS section 103 differ from IPC section 302 on murder?","pattern":"decomposition"}' | jq '{status, message, t: (.trace | {decompose, subquestions, union_count}), s: [.subquestions[] | {subquestion, status, reason, ids: [.results[].section_id]}], r: [.results[] | .section_id]}'
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"What if someone takes my phone from my pocket without me noticing?","pattern":"hyde"}' | jq '{status, t: (.trace | {hypothesis, direct_count, hyde_count}), d: [.hyde_direct_candidates[].section_id], h: [.hyde_query_candidates[].section_id], r: [.results[] | .section_id], dbg_chars: (.hyde_hypothetical_text_debug | length)}'
+curl -sN http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"rag-decomposition","stream":true,"messages":[{"role":"user","content":"How does BNS section 103 differ from IPC section 302 on murder?"}]}' | head -c 1500
+```
+
+Expected: decomposition `ok` with 2-3 `supported` subquestions (inspect before chat); `partial_answer`/`clarify` when one lacks evidence (no generation). HyDE `ok`, both candidate lists populated, `results` hold real passages only. Chat: DRAFT/confidence/Sources. Missing generation setting: 503 `retrieval_not_ready`.

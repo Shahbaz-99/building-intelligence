@@ -186,6 +186,31 @@ def chunk_result(chunk: dict, section: dict, score: float, **extra) -> Retrieved
     )
 
 
+def open_db():
+    """Return (db, voyage) after config and index readiness checks (reused by Story 5.2 modes)."""
+    mongo, voyage = _clients()
+    db = mongo[get_settings().mongodb_db_name]
+    _check_ready(db)
+    return db, voyage
+
+
+def search_chunks(db, vector: list[float], filters: dict, limit: int) -> list[RetrievedChunk]:
+    """One vector search resolved to real passages, in score order; unresolved hits omitted."""
+    try:
+        hits = vector_search(db, vector, filters, limit, num_candidates(limit))
+        chunks, sections = resolve_sections(db, hits)
+    except PyMongoError:
+        _reset_ready()
+        raise _upstream("MongoDB query failed.") from None
+    out: list[RetrievedChunk] = []
+    for hit in hits:
+        chunk = chunks.get(hit["chunk_id"])
+        section = sections.get(chunk["section_id"]) if chunk else None
+        if chunk is not None and section is not None:
+            out.append(chunk_result(chunk, section, hit["score"]))
+    return out
+
+
 def run_semantic(request: QueryRequest) -> dict:
     check_scope(request)
     settings = get_settings()
