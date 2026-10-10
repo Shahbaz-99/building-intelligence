@@ -84,6 +84,19 @@ class RetrievedChunk(BaseModel):
     omitted_reason: str | None = None
 
 
+class StructuredSignals(BaseModel):
+    """Validated output of the rule-based structured classifier (Story 5.1)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    intent: Literal["exact_lookup", "filter", "aggregation"] | None = None
+    act: Literal["BNS_2023", "IPC_1860"] | None = None
+    section_number: int | None = Field(default=None, ge=1, le=999)
+    chapter: str | None = None
+    status: Literal["ok", "recommendation", "clarification_needed"]
+    reason: str
+
+
 class GenerationClaim(BaseModel):
     text: str
     evidence_labels: list[str] = Field(default_factory=list)

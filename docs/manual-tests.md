@@ -52,15 +52,15 @@ curl -s http://127.0.0.1:8000/v1/query \
 
 Expected (needs `.env` incl. `RERANK_API_KEY`): `"status":"ok"`, `results` ordered by `rerank_rank` with `score == rerank_score`, cut candidates in `omitted_candidates` with `omitted_reason`. Empty `RERANK_API_KEY`: HTTP 503 `retrieval_not_ready`.
 
-### Query — structured
+### Query — decomposition
 
 ```bash
 curl -s http://127.0.0.1:8000/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "structured"}'
+  -d '{"question": "What is theft?", "pattern": "decomposition"}'
 ```
 
-Expected: `"status":"not_implemented"`, message references `structured`.
+Expected: `"status":"not_implemented"`, message references `decomposition`.
 
 ### Query — decomposition
 
@@ -97,7 +97,7 @@ Expected: 422 validation error (question below min_length 1).
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-structured", "messages": [{"role": "user", "content": "What is theft?"}]}'
+  -d '{"model": "rag-decomposition", "messages": [{"role": "user", "content": "What is theft?"}]}'
 ```
 
 Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contains `not implemented yet`.
@@ -107,7 +107,7 @@ Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contai
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-structured", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
+  -d '{"model": "rag-decomposition", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
 ```
 
 Expected: SSE `data:` frames with `delta` role then content, ending with `data: [DONE]`.
@@ -231,7 +231,7 @@ curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d 
 curl -sN http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json"   -d '{"model":"rag-hybrid","stream":true,"messages":[{"role":"user","content":"criminal breach of trust"}]}' | head -c 1500
 ```
 
-Expected: `status` `ok`, results in non-increasing `score`, each with a `semantic_rank` or `keyword_rank`; chat shows DRAFT, confidence, Sources. `structured`, `decomposition`, `hyde` still `not_implemented`.
+Expected: `status` `ok`, results in non-increasing `score`, each with a `semantic_rank` or `keyword_rank`; chat shows DRAFT, confidence, Sources. `decomposition`, `hyde` still `not_implemented`.
 
 ## Story 4.2 — Hybrid re-ranking
 
@@ -241,3 +241,14 @@ curl -sN http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application
 ```
 
 Expected: `status` `ok`; results + omitted = `trace.rerank.candidates`; chat shows DRAFT, confidence, Sources. Empty `RERANK_API_KEY` (restart API): 503 `retrieval_not_ready`, `hybrid` still `ok`.
+
+## Story 5.1 — Structured exact retrieval
+
+```bash
+for q in "What does BNS section 103 say?" "IPC section 302" "What does section 103 say?" "IPC section 4" "What is the punishment for theft?"; do
+  curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"     -d "{\"question\":\"$q\",\"pattern\":\"structured\"}"     | jq '{status, t: (.trace | {signals, mongodb_called, record}), r: [.results[] | {section_id, act, status, text: .text[:60]}]}'
+done
+curl -sN http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json"   -d '{"model":"rag-structured","stream":true,"messages":[{"role":"user","content":"What does BNS section 103 say?"}]}' | head -c 1500
+```
+
+Expected: `ok` + `bns:103`, `ok` + `ipc:302`, `clarification_needed` (no MongoDB call), `not_found` (MongoDB called), `recommendation` (no MongoDB call). Chat: DRAFT/confidence/Sources for the first; plain clarification text for `section 103`.

@@ -42,7 +42,7 @@ One shared registry (single source of truth) holds only:
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
 
-`semantic` (Story 2.3), `hybrid` (Story 4.1) and `hybrid-reranked` (Story 4.2) are real on `POST /v1/query`; chat for their `rag-*` models runs the same path with streamed answers (Story 3.2); every other mode still returns an honest `not_implemented` placeholder until its own story adds behavior.
+`semantic` (Story 2.3), `hybrid` (Story 4.1) `hybrid-reranked` (Story 4.2) and `structured` (Story 5.1) are real on `POST /v1/query`; chat for their `rag-*` models runs the same path with streamed answers (Story 3.2); every other mode still returns an honest `not_implemented` placeholder until its own story adds behavior.
 
 ## API contracts
 
@@ -73,7 +73,7 @@ A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text
 ### Endpoints
 
 - `GET /healthz` — safe, no credentials required.
-- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`; `semantic` goes to `retrieval/semantic.py`, `hybrid` to `retrieval/hybrid.py`, `hybrid-reranked` to `retrieval/rerank.py`, other modes return the `run_pattern` placeholder.
+- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`; `semantic` goes to `retrieval/semantic.py`, `hybrid` to `retrieval/hybrid.py`, `hybrid-reranked` to `retrieval/rerank.py`, `structured` to `retrieval/structured.py`, other modes return the `run_pattern` placeholder.
 - `GET /v1/models` — lists the six `rag-<pattern>` model IDs.
 - `POST /v1/chat/completions` — OpenAI-compatible, text-only `ChatCompletionRequest`: `model`, `messages` with `system`/`developer`/`user`/`assistant` roles, `stream`, `n`, and optional strict `rag_options` (`pattern`, list filters, `limit`, `required_acts`, `chapter`).
 
@@ -99,7 +99,7 @@ curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d 
 
 ## Context and answer boundaries (Story 3.1)
 
-Flow: result from any real mode (semantic, hybrid, hybrid-reranked) -> bounded labelled context (`generation/context.py`: max 5 passages, 12,000 chars, labels `E1..`, no mid-text cuts) -> one `POST {GENERATION_API_BASE_URL}/chat/completions` (`generation/answer.py`, httpx, 30 s, no retries) -> strict JSON parse -> citations resolved from supplied context only.
+Flow: result from any real mode (semantic, hybrid, hybrid-reranked, structured with status `ok`) -> bounded labelled context (`generation/context.py`: max 5 passages, 12,000 chars, labels `E1..`, no mid-text cuts) -> one `POST {GENERATION_API_BASE_URL}/chat/completions` (`generation/answer.py`, httpx, 30 s, no retries) -> strict JSON parse -> citations resolved from supplied context only.
 
 - Outcomes (`GenerationResult.outcome`): `answered` (text, claims, citations, supporting passages), `insufficient_evidence` (also when no passages; no model call), `unavailable` (missing settings, timeout, connection error, non-2xx), `malformed` (non-JSON, no `choices`, unknown label, rule violation; no repair or retry). Non-answered outcomes carry empty text, claims, citations.
 - HTTP 200 for unavailable/malformed; retrieval `results` and `status` are unchanged. No URL or key in messages or trace.
@@ -183,3 +183,12 @@ Each record has 14 fields: `section_id`, `act`, `act_label`, `status`, `chapter`
 - Outcomes: `ok`, `no_results`, 503 (config), 502 (provider). No fallback to hybrid.
 - Limitations: candidates beyond the top `RERANK_CANDIDATE_LIMIT` are never seen; each passage is scored independently against the question; scores are model-specific, uncalibrated, not comparable with fused scores or across questions; no score cutoff; one extra provider call per request (latency, cost, rate limits); no retry, no fallback; answer context cap (5 passages / 12,000 chars) still applies.
 - Diagnostic: `curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question":"<q>","pattern":"hybrid-reranked","limit":5}'`; read `trace.rerank`, then `results` and `omitted_candidates` (`fused_rank`, `rerank_rank`, `omitted_reason`), truncating `text`.
+
+## Structured exact retrieval (Story 5.1)
+
+- `StructuredSignals` (`contracts.py`, `extra="forbid"`): `intent`, `act`, `section_number` (1-999), `chapter`, `status` (`ok`/`recommendation`/`clarification_needed`), `reason`. `retrieval/structured.py::classify` is pure and rule-based (no LLM, no I/O).
+- Classified: `section N` / `sec. N` / `s. N` / `§N` (integer) plus one act token (BNS, IPC, full names) -> `ok`. Refused: aggregation ("how many", "count", "total number") and filter ("list", "all sections", "which sections", "sections in/under") -> `recommendation`, never executed; no act, both acts, several numbers, non-integer or out-of-range number -> `clarification_needed` (acts never guessed); anything else -> `recommendation` (use `semantic`/`hybrid`).
+- Exact-input contract: only classifier output (validated `act`, `section_number`) plus server-fixed `access_level=["public"]`, optional `status` filter and optional validated `chapter` (1-40 of letters, digits, space, `.`, `-`; else 422 `unsupported_option`; never parsed from the question) reach MongoDB. Raw question text never does. One read-only `find_one` on `sections`, projection without `provenance`. No Voyage or index use.
+- Outcomes: `ok` (one `RetrievedChunk`, `chunk_id = section_id`, `score = 1.0` = exact match, not similarity), `not_found` (this corpus has no record; not a claim about the law), `clarification_needed`, `recommendation`; 503 `retrieval_not_ready` (no `MONGODB_URI`, only when a lookup is needed); 502 `retrieval_upstream_error`. Scope: `caller_id` mismatch and `required_acts` rejected (422); `chapter` accepted.
+- Answer boundary: retrieval returns the exact record; explanation only through the existing grounded-answer path when `generate_answer` is true (always in chat). Non-`ok` results never call a model; chat streams `message` as plain text. `status`/`source_status_version` are source metadata, not current legal applicability.
+- Limitations: integer sections only (no `103A`); no multi-section or cross-act comparison; filter/aggregation recognised but not executed; IPC sections 4, 5, 18, 34, 40, 75, 161-165 absent from `sections`; rule-based phrasing misses; a section over the 12,000-char context cap gives `insufficient_evidence` when answered (direct inspection still returns it).
